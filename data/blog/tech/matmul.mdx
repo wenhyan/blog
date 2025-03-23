@@ -1,0 +1,159 @@
+---
+title: Matmul 矩阵乘法
+date: '2025-03-23'
+tags: ['Torch', 'Deep Learning', 'Matmul', 'LLM']
+draft: false
+summary: 'Matmul 矩阵乘法是深度学习中的基础操作，尤其是在 Transformer 模型中，矩阵乘法是最核心的操作之一。本文简单写一下自己的一些理解。'
+---
+
+### 定义
+维基百科中的定义： [矩阵乘法](https://zh.wikipedia.org/zh-hans/%E7%9F%A9%E9%99%A3%E4%B9%98%E6%B3%95) <br></br>
+数学中，矩阵乘法（英语：matrix multiplication）是一种根据两个矩阵得到第三个矩阵的二元运算，第三个矩阵即前两者的乘积，称为矩阵积（英语：matrix product）。
+设 $A$ 是一个$n \times m$的矩阵，$B$ 是一个$m \times p$的矩阵，那么它们的乘积$C$是一个$n \times p$的矩阵。
+$A$中的每一行的$m$个元素都与$B$中对应列的$m$个元素对应相乘，这些乘积的和得到$C$中的一个元素。
+
+### 理解
+画了两个图来表示矩阵的乘法.
+#### 向量的乘法
+先理解一下最简单的一维的矩阵，即向量的乘法。
+![vetor_mul](/static/images/tech/vetor_product.png)
+上图中，$A$ 和 $B$ 是两个向量，它们的乘积是一个标量，即两个向量对应位置的元素相乘再相加得到的结果。实际上可以把它看成是两个矩阵的乘法，$A$ 是一个 $1 \times 5$ 的矩阵，$B$ 是一个 $5 \times 1$ 的矩阵，它们的乘积是一个 $1 \times 1$ 的矩阵。
+
+向量的乘法实现起来比较简单
+```python
+def matmul1D(mat1 : torch.tensor, mat2 : torch.tensor) -> int:
+    mat3 = 0
+    for i in range(mat1.shape[0]): # mat1.shape[0] = mat2.shape[0]
+        mat3 += mat1[i] * mat2[i]   
+    return mat3
+```
+```cpp
+float matmul1D(std::vector<float> vec1, std::vector<float> vec2)    
+{
+    float result = 0;
+    for (int i = 0; i < vec1.size(); i++)
+    {
+        result += vec1[i] * vec2[i];
+    }
+    return result;
+}
+```
+
+#### 矩阵的乘法
+下图是二维矩阵的乘法，$A$ 是一个 $3 \times 4$ 的矩阵，$B$ 是一个 $4 \times 3$ 的矩阵，它们的乘积是一个 $3 \times 3$ 的矩阵。
+![matrix_mul](/static/images/tech/matmul.png)
+二维矩阵的乘法可以看成是多个向量的乘法的堆叠，$A$ 的每一行和 $B$ 的每一列相乘再相加得到的结果。这样就可以得到一个新的矩阵。
+矩阵的乘法实现起来复杂一点。
+<br></br>首先，矩阵乘法得到的结果是一个 $n \times p$ 的矩阵，也就是矩阵$ A $的行数和矩阵$ B $的列数$ 3 \times 3 $。
+把矩阵的乘法理解成多个向量的乘法，先遍历矩阵$ A $的每一行，也就是 **mat1.shape[0]**，然后遍历矩阵$ B $的每一列，也就是 **mat2.shape[1]**，
+最后遍历计算各个向量的乘法，也就是 **mat1.shape[1]** 或者 **mat2.shape[0]**，这对应了每个向量的长度。从这里就可以看出来，矩阵乘法要求两个矩阵的维度要满足一定的条件，即矩阵$ A $的列数等于矩阵$ B $的行数。
+
+```python
+def matmul2D(mat1 : torch.tensor, mat2 : torch.tensor) -> torch.tensor:
+    mat3 = torch.zeros(mat1.shape[0], mat2.shape[1])
+    for i in range(mat1.shape[0]):
+        for j in range (mat2.shape[1]):
+            for k in range(mat1.shape[1]):
+                mat3[i, j] += mat1[i, k] * mat2[k, j]
+    return mat3
+```
+
+```cpp
+typedef struct Matrix
+{
+    std::vector<std::vector<float>> data;
+    int rows;
+    int cols;
+} Matrix;
+
+Matrix matmul2D(Matrix mat1, Matrix mat2)
+{
+    Matrix result;
+    result.rows = mat1.rows;
+    result.cols = mat2.cols;
+
+    for (int i = 0; i < mat1.rows; i++) // 第一个矩阵的所有行向量
+    {
+        std::vector<float> vecMul; // 每一行的结果，size = mat2.cols
+        for (int j = 0; j < mat2.cols; j++) // 第二个矩阵的所有列向量
+        {
+            float sum = 0;
+            for (int k = 0; k < mat1.cols; k++) // mat1.cols == mat2.rows
+            {
+                sum += mat1.data[i][k] * mat2.data[k][j];
+            }
+            vecMul.push_back(sum); 
+        }
+        result.data.push_back(vecMul);
+    }
+    return result;
+}   
+```
+#### 三维矩阵的乘法
+同样的，在深度学习中的三维矩阵乘法，也就是常见的 **Tensor** 的乘法，可以看成是多个二维矩阵的乘法的堆叠，
+$A$ 的每一个二维矩阵和 $B$ 的每一个二维矩阵相乘再相加得到的结果。这样就可以得到一个新的三维矩阵。
+![tensor_mul](/static/images/tech/matmul3d.png)
+第一个维度可以理解成是一个 **batch** 的大小，第二个维度是一个二维矩阵的行数，第三个维度是一个二维矩阵的列数。
+```python
+def matmul3D(mat1 : torch.tensor, mat2 : torch.tensor) -> torch.tensor:
+    mat3 = torch.zeros(mat1.shape[0], mat1.shape[1], mat2.shape[2])
+    for i in range(mat1.shape[0]):
+        for j in range(mat1.shape[1]):
+            for k in range(mat2.shape[2]):
+                for l in range(mat1.shape[2]):
+                    mat3[i, j, k] += mat1[i, j, l] * mat2[i, l, k]
+    return mat3
+```
+```cpp
+typedef struct Tensor
+{
+    std::vector<Matrix> data;
+    int rows;
+    int cols;
+    int depth;
+} Tensor;
+
+Tensor matmul3D(Tensor ten1, Tensor ten2)
+{
+    Tensor result;
+    result.rows = ten1.rows;
+    result.cols = ten2.cols;
+    result.depth = ten1.depth;
+
+    for (int i = 0; i < ten1.depth; i++)
+    {
+        Matrix mat;
+        mat.rows = ten1.rows;
+        mat.cols = ten2.cols;
+        for (int j = 0; j < ten1.rows; j++)
+        {
+            std::vector<float> vecMul;
+            for (int k = 0; k < ten2.cols; k++)
+            {
+                float sum = 0;
+                for (int l = 0; l < ten1.cols; l++)
+                {
+                    sum += ten1.data[i].data[j][l] * ten2.data[i].data[l][k];
+                }
+                vecMul.push_back(sum);
+            }
+            mat.data.push_back(vecMul);
+        }
+        result.data.push_back(mat);
+    }
+    return result;
+}
+```
+
+### 总结
+矩阵的乘法从公式上看比较简单，只涉及到了矩阵的相乘和相加，但是实际上实现起来比较复杂，需要考虑到矩阵的维度，以及矩阵的乘法规则。
+从向量的乘法到矩阵的乘法，再到三维矩阵的乘法，可以看出来矩阵的乘法是一个递归的过程，每一层的乘法都是上一层乘法的堆叠。
+通过一步步的拆解，这样就很好理解如何实现矩阵的乘法了。<br></br>
+
+**torch** 有相关的函数 **torch.matmul()** 和 **@** 来实现矩阵的乘法，并且带有 **broadcasting** 的功能，可以实现不同维度的矩阵的乘法。
+
+### 参考
+- [矩阵乘法](https://zh.wikipedia.org/zh-hans/%E7%9F%A9%E9%99%A3%E4%B9%98%E6%B3%95)
+- [全面理解多维矩阵运算 多维（三维四维）矩阵向量运算-超强可视化](https://zhuanlan.zhihu.com/p/337829793)
+- [torch.matmul](https://pytorch.org/docs/stable/generated/torch.matmul.html)
+- [ChatGPT](https://chatgpt.com/)
