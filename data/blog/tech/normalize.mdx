@@ -1,0 +1,249 @@
+---
+title: 数据预处理中的 Normalize
+date: '2025-04-06'
+tags: ['Torch', 'Deep Learning', 'Normalization', 'CV', 'NEON']
+draft: false
+summary: '标准化是数据预处理中经常使用的一个计算，回顾一下各种实现和自己在 Arm 端的 NEON Intrinsics 优化'
+---
+
+### 背景
+在图像目标检测任务中，训练和推理检测时，都要对输入图片做预处理，其中有一步是标准化。
+将数据的数值范围标准化或调整到某个预期的尺度。其目的是确保不同特征或数据集中的数值在同一个范围内，以避免模型训练时因不同尺度特征带来的不公平影响。
+
+### 理解
+从 torch 中的 transforms.Normalize 入手。
+#### 使用
+
+```python
+from torchvision import transforms
+from PIL import Image
+
+transform = transforms.Compose([
+    transforms.ToTensor(),  # 将图像转换为 Tensor
+    # transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+img = Image.open('test.jpg')
+img_tensor = transform(img)
+```
+定义好 transform 之后，应用到 img 上，就可以对读入图片进行标准化操作。ToTensor() 这个函数比较简单，顾名思义就是将图片的像素转换为浮点数，从 0-255 映射到 0.0-1.0 之间。
+也可以看作对数据的标准化，公式比较简单 $X_{tensor} = \frac{X_{PIL}}{256}$ ， 每个像素值除以255，得到浮点格式的值，然后将数据的 layout 从 HWC 转为 CHW。
+normalize 是真正的标准化操作，代码中有一段注释解释。
+```python
+"""
+Normalize a tensor image with mean and standard deviation.
+This transform does not support PIL Image.
+Given mean: ``(mean[1],...,mean[n])`` and std: ``(std[1],..,std[n])`` for ``n``
+channels, this transform will normalize each channel of the input
+``torch.*Tensor`` i.e.,
+``output[channel] = (input[channel] - mean[channel]) / std[channel]``
+"""
+```  
+可以看到，具体的公式是对每个 channel 使用均值和方差操作。$X_{norm} = \frac{X - \mu}{\sigma}$，维基百科中有这样的定义。
+标准分数（Standard Score，又称 z-score，中文称为 Z-分数或标准分或标准计分[1]）在统计学中是一种无因次值，就是一种纯数字标记，
+是借由从单一（原始）分数中减去总体的平均值，再依照总体（母集合）的标准差分割成不同的差距，按照z值公式，各个样本在经过变换后，
+通常在正、负五到六之间不等。其算数平均数必为0，标准差必为1。
+
+#### 简单实现
+做一个简单的验证。
+
+```python
+from torchvision import transforms
+from PIL import Image
+import numpy as np 
+import torch
+
+def Convert2Tensor(x: torch.tensor) -> torch.tensor:
+    x_out = x.permute(2, 0, 1)
+    x_out = x_out.float()
+    x_out /= 255.0
+    return x_out
+
+def Normalize(x: torch.tensor) -> torch.tensor:
+    mean = torch.tensor([0.485, 0.456, 0.406])
+    std = torch.tensor(  [0.229, 0.224, 0.225])
+
+    x_out = (x - mean[:, None, None]) / std[:, None, None]
+
+    return x_out
+
+# 定义标准化操作
+transform = transforms.Compose([
+    transforms.ToTensor(),  # 将图像转换为 Tensor
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
+# 假设你有一个 PIL 图像 img
+img = Image.open('test.jpg')
+img_array = np.array(img)
+print(img)
+print(img_array.shape)
+
+test = Convert2Tensor(torch.tensor(img_array))
+print(test.shape)
+normalize_out = Normalize(test)
+print(normalize_out)
+
+# 应用标准化
+img_tensor = transform(img)
+print("=======================================================================")
+print(img_tensor.size())
+print(img_tensor)
+```
+
+Convert2Tensor() 是自己实现的转换函数，Normalize() 是自己实现的标准化函数，下面是执行的结果，可以看到我们自己的实现和使用 transforms 是一样的结果。
+先将像素值转为 float 格式，然后做一个 layout 的转化，最后统一标准化。
+
+```python
+<PIL.JpegImagePlugin.JpegImageFile image mode=RGB size=500x333 at 0x7F921BDB0970>
+(333, 500, 3)
+torch.Size([3, 333, 500])
+tensor([[[-1.0219, -0.9705, -0.9705,  ..., -1.0390, -0.6109, -0.6623],
+         [-0.9363, -1.0562, -1.1418,  ..., -1.2274, -1.0904, -0.7137],
+         [-1.0390, -1.1247, -1.1247,  ..., -0.9020, -0.9363, -1.1075],
+         ...,
+         [ 0.1597,  0.1597,  0.1426,  ...,  0.9132,  0.9132,  0.9132],
+         [ 0.1768,  0.1768,  0.1597,  ...,  0.9132,  0.9132,  0.9132],
+         [ 0.1768,  0.1768,  0.1768,  ...,  0.8961,  0.8961,  0.8961]],
+
+        [[-0.9678, -0.9153, -0.9153,  ..., -1.2829, -0.8803, -0.9328],
+         [-0.8803, -1.0028, -1.0903,  ..., -1.4405, -1.3004, -0.8978],
+         [-0.9853, -1.0728, -1.0728,  ..., -0.9503, -1.0203, -1.1954],
+         ...,
+         [ 0.1702,  0.1702,  0.1527,  ...,  0.9405,  0.9405,  0.9405],
+         [ 0.1877,  0.1877,  0.1702,  ...,  0.9405,  0.9405,  0.9405],
+         [ 0.1877,  0.1877,  0.1877,  ...,  0.9230,  0.9230,  0.9230]],
+
+        [[-1.0724, -1.0201, -0.9853,  ..., -1.4733, -1.0550, -1.1073],
+         [-0.9853, -1.1073, -1.1596,  ..., -1.6302, -1.4907, -1.1247],
+         [-1.0550, -1.1421, -1.1073,  ..., -1.2293, -1.2816, -1.4907],
+         ...,
+         [ 0.2173,  0.2173,  0.1999,  ...,  1.0191,  1.0191,  1.0191],
+         [ 0.2348,  0.2348,  0.2173,  ...,  1.0191,  1.0191,  1.0191],
+         [ 0.2348,  0.2348,  0.2348,  ...,  1.0017,  1.0017,  1.0017]]])
+=======================================================================
+torch.Size([3, 333, 500])
+tensor([[[-1.0219, -0.9705, -0.9705,  ..., -1.0390, -0.6109, -0.6623],
+         [-0.9363, -1.0562, -1.1418,  ..., -1.2274, -1.0904, -0.7137],
+         [-1.0390, -1.1247, -1.1247,  ..., -0.9020, -0.9363, -1.1075],
+         ...,
+         [ 0.1597,  0.1597,  0.1426,  ...,  0.9132,  0.9132,  0.9132],
+         [ 0.1768,  0.1768,  0.1597,  ...,  0.9132,  0.9132,  0.9132],
+         [ 0.1768,  0.1768,  0.1768,  ...,  0.8961,  0.8961,  0.8961]],
+
+        [[-0.9678, -0.9153, -0.9153,  ..., -1.2829, -0.8803, -0.9328],
+         [-0.8803, -1.0028, -1.0903,  ..., -1.4405, -1.3004, -0.8978],
+         [-0.9853, -1.0728, -1.0728,  ..., -0.9503, -1.0203, -1.1954],
+         ...,
+         [ 0.1702,  0.1702,  0.1527,  ...,  0.9405,  0.9405,  0.9405],
+         [ 0.1877,  0.1877,  0.1702,  ...,  0.9405,  0.9405,  0.9405],
+         [ 0.1877,  0.1877,  0.1877,  ...,  0.9230,  0.9230,  0.9230]],
+
+        [[-1.0724, -1.0201, -0.9853,  ..., -1.4733, -1.0550, -1.1073],
+         [-0.9853, -1.1073, -1.1596,  ..., -1.6302, -1.4907, -1.1247],
+         [-1.0550, -1.1421, -1.1073,  ..., -1.2293, -1.2816, -1.4907],
+         ...,
+         [ 0.2173,  0.2173,  0.1999,  ...,  1.0191,  1.0191,  1.0191],
+         [ 0.2348,  0.2348,  0.2173,  ...,  1.0191,  1.0191,  1.0191],
+         [ 0.2348,  0.2348,  0.2348,  ...,  1.0017,  1.0017,  1.0017]]])
+```
+C++ 版本的实现，这里只实现 normalize 的过程。默认输入的 Tensor 为 CHW 排布。每个通道使用不同的参数进行处理，这是最朴素的实现方法。
+```cpp
+void normalize(float *x, float *x_out, int C, int H, int W)
+{
+    float means[3] = {0.485, 0.456, 0.406};
+    float stds[3] = {0.229, 0.224, 0.225};
+
+    // C H W
+    for (int c = 0; c < C; c++)
+    {
+        float channel_mean = means[c];
+        float channel_std = stds[c];
+        for (int h = 0; h < H; h++)
+        {
+            for (int w = 0; w < W; w++)
+            {
+                int index = c * H * W + h * W + w;
+                x_out[index] = (x[index] - channel_mean) / channel_std;
+            }
+        }
+    }
+}
+```
+
+#### 工程优化
+在板端甚至是嵌入式的产品中，目标检测模型已经有大量的应用，而且对推理的延迟有很高的要求，因此很多计算在 ARM 端都会使用 NEON Intrinsics 去做计算的优化。
+normalize 的操作很适合做向量化，每个元素之间没有上下文的练习，不会有数据上的冲突。可将每个 channel 的计算展开，利用 NEON 的向量寄存器并行计算，加快速度。
+
+```cpp
+#include <iostream>
+#include <chrono>
+#include <arm_neon.h>
+
+float means[3] = {0.485, 0.456, 0.406};
+float stds[3] = {0.229, 0.224, 0.225};
+
+void normalize(float *x, float *x_out, int C, int H, int W)
+{
+    // C H W
+    for (int c = 0; c < C; c++)
+    {
+        float channel_mean = means[c];
+        float channel_std = stds[c];
+        for (int h = 0; h < H; h++)
+        {
+            for (int w = 0; w < W; w++)
+            {
+                int index = c * H * W + h * W + w;
+                x_out[index] = (x[index] - channel_mean) / channel_std;
+            }
+        }
+    }
+}
+
+void normalizeV2(float *x, float *x_out, int C, int H, int W)
+{
+    for (int c = 0; c < C; c++)
+    {
+        // 对每个通道，使用均值和标准差
+        float channelMeans[4] = {-means[c], -means[c], -means[c], -means[c]}; // 使用正的均值
+        float channelStds[4] = {1/stds[c], 1/stds[c], 1/stds[c], 1/stds[c]};       // 标准差不变
+
+        float32x4_t vMean = vld1q_f32(channelMeans);   // 加载均值
+        float32x4_t vStd = vld1q_f32(channelStds);     // 加载标准差
+
+        int index = 0;
+
+        // 处理每个像素
+        for (int i = 0; i < H * W - 4; i += 4)
+        {
+            index = i + H * W * c;
+            float32x4_t vX = vld1q_f32(x + index);    // 加载 4 个像素
+            float32x4_t vXSub = vaddq_f32(vX, vMean);  // 减去均值
+            float32x4_t vXOut = vmulq_f32(vXSub, vStd); // 除以标准差
+            vst1q_f32(x_out + index, vXOut);            // 存储结果
+        }
+
+        // 处理剩余的元素
+        if (H * W % 4 != 0)
+        {
+            for (int i = H * W - H * W % 4; i < H * W; i++)
+            {
+                index = i + H * W * c;
+                x_out[index] = (x[index] - means[c]) / stds[c];
+            }
+        }
+    }
+}
+```
+代码中使用 NEON Intrinsics 做一个简单的向量化，基本可减少一半的计算时间。实际应用中可以使用很多类似的向量化操作，现代的编译器也可以自动向量化。
+
+### 总结
+数据的标准化是一个经常使用的操作，在前处理中非常重要，因为其基本没有数据冲突，因此非常适合向量化操作进行优化。
+另外还有网络中经常使用 Normalization 操作，也非常值得深究，考虑后续写一些自己的理解。
+在 Nvida 平台的优化也要研究一下，如何用 Cuda 去实现并且做简单的优化工作。
+
+### 参考
+- [标准化和归一化，请勿混为一谈，透彻理解数据变换](https://blog.csdn.net/weixin_36604953/article/details/102652160)
+- [NEON Intrinsics](https://developer.arm.com/architectures/instruction-sets/intrinsics)
+- [MNN](https://github.com/alibaba/MNN/blob/513bf365128f164dbb8499f96ac86affdf9e09c5/source/backend/cpu/compute/ImageProcessFunction.cpp#L553C99-L553C100)
